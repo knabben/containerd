@@ -326,14 +326,15 @@ func (c *criService) windowsContainerMetrics(
 	}
 
 	if stats != nil {
-		s, err := typeurl.UnmarshalAny(stats.Data)
+		data, err := convertMetric(stats)
 		if err != nil {
 			return containerStats{}, fmt.Errorf("failed to extract container metrics: %w", err)
 		}
-		wstats := s.(*wstats.Statistics).GetWindows()
+		wstats := data.(*wstats.Statistics).GetWindows()
 		if wstats == nil {
 			return containerStats{}, errors.New("windows stats is empty")
 		}
+
 		if wstats.Processor != nil {
 			cs.Cpu = &runtime.CpuUsage{
 				Timestamp:            (protobuf.FromTimestamp(wstats.Timestamp)).UnixNano(),
@@ -382,25 +383,12 @@ func (c *criService) linuxContainerMetrics(
 	}
 
 	if stats != nil {
-		var data interface{}
-		switch {
-		case typeurl.Is(stats.Data, (*cg1.Metrics)(nil)):
-			data = &cg1.Metrics{}
-			if err := typeurl.UnmarshalTo(stats.Data, data); err != nil {
-				return containerStats{}, fmt.Errorf("failed to extract container metrics: %w", err)
-			}
-			pids = data.(*cg1.Metrics).GetPids().GetCurrent()
-		case typeurl.Is(stats.Data, (*cg2.Metrics)(nil)):
-			data = &cg2.Metrics{}
-			if err := typeurl.UnmarshalTo(stats.Data, data); err != nil {
-				return containerStats{}, fmt.Errorf("failed to extract container metrics: %w", err)
-			}
-			pids = data.(*cg2.Metrics).GetPids().GetCurrent()
-		default:
-			return containerStats{}, errors.New("cannot convert metric data to cgroups.Metrics")
+		data, err := convertMetric(stats)
+		if err != nil {
+			return nil, err
 		}
 
-		cpuStats, err := c.cpuContainerStats(meta.ID, false /* isSandbox */, data, protobuf.FromTimestamp(stats.Timestamp))
+		cpuStats, err := c.cpuContainerStats(data, protobuf.FromTimestamp(stats.Timestamp))
 		if err != nil {
 			return containerStats{}, fmt.Errorf("failed to obtain cpu stats: %w", err)
 		}
@@ -411,9 +399,6 @@ func (c *criService) linuxContainerMetrics(
 			return containerStats{}, fmt.Errorf("failed to obtain memory stats: %w", err)
 		}
 		cs.Memory = memoryStats
-		if err != nil {
-			return containerStats{}, fmt.Errorf("failed to obtain pid count: %w", err)
-		}
 	}
 
 	return containerStats{&cs, pids}, nil
@@ -470,7 +455,7 @@ func getAvailableBytesV2(memory *cg2.MemoryStat, workingSetBytes uint64) uint64 
 	return 0
 }
 
-func (c *criService) cpuContainerStats(ID string, isSandbox bool, stats interface{}, timestamp time.Time) (*runtime.CpuUsage, error) {
+func (c *criService) cpuContainerStats(stats interface{}, timestamp time.Time) (*runtime.CpuUsage, error) {
 	switch metrics := stats.(type) {
 	case *cg1.Metrics:
 		metrics.GetCPU().GetUsage()
