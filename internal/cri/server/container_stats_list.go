@@ -160,13 +160,20 @@ func (c *criService) toContainerStats(
 			return nil, fmt.Errorf("failed to decode container metrics for %q: %w", cntr.ID, err)
 		}
 
-		if cs.stats.Cpu != nil && cs.stats.Cpu.UsageCoreNanoSeconds != nil {
-			// this is a calculated value and should be computed for all OSes
-			nanoUsage, err := c.getUsageNanoCores(cntr.Metadata.ID, false, cs.stats.Cpu.UsageCoreNanoSeconds.Value, time.Unix(0, cs.stats.Cpu.Timestamp))
-			if err != nil {
-				return nil, fmt.Errorf("failed to get usage nano cores, containerID: %s: %w", cntr.Metadata.ID, err)
+		if cs.stats.Cpu != nil {
+			// check if stats metrics has scheduled collection enabled
+			// otherwise request at runtime.
+			if c.config.StatsMetricsPeriod == 0 && cs.stats.Cpu.UsageCoreNanoSeconds != nil {
+				nanoUsage, err := c.getUsageNanoCores(cntr.Metadata.ID, false, cs.stats.Cpu.UsageCoreNanoSeconds.Value, time.Unix(0, cs.stats.Cpu.Timestamp))
+				if err != nil {
+					return nil, fmt.Errorf("failed to get usage nano cores, containerID: %s: %w", cntr.Metadata.ID, err)
+				}
+				cs.stats.Cpu.UsageNanoCores = &runtime.UInt64Value{Value: nanoUsage}
+			} else if cntr.Stats != nil {
+				// this is a calculated value and should be computed for all OSes
+				// this is a calculated value every 10s
+				cs.stats.Cpu.UsageNanoCores = &runtime.UInt64Value{Value: cntr.Stats.UsageNanoCores}
 			}
-			cs.stats.Cpu.UsageNanoCores = &runtime.UInt64Value{Value: nanoUsage}
 		}
 		css = append(css, cs)
 	}
@@ -385,7 +392,12 @@ func (c *criService) linuxContainerMetrics(
 	if stats != nil {
 		data, err := convertMetric(stats)
 		if err != nil {
-			return nil, err
+			return containerStats{}, err
+		}
+
+		switch {
+		case typeurl.Is(stats.Data, (*cg2.Metrics)(nil)):
+			pids = data.(*cg2.Metrics).GetPids().GetCurrent()
 		}
 
 		cpuStats, err := c.cpuContainerStats(data, protobuf.FromTimestamp(stats.Timestamp))
@@ -394,7 +406,7 @@ func (c *criService) linuxContainerMetrics(
 		}
 		cs.Cpu = cpuStats
 
-		memoryStats, err := c.memoryContainerStats(meta.ID, data, protobuf.FromTimestamp(stats.Timestamp))
+		memoryStats, err := c.memoryContainerStats(data, protobuf.FromTimestamp(stats.Timestamp))
 		if err != nil {
 			return containerStats{}, fmt.Errorf("failed to obtain memory stats: %w", err)
 		}
@@ -481,7 +493,7 @@ func (c *criService) cpuContainerStats(stats interface{}, timestamp time.Time) (
 	return nil, nil
 }
 
-func (c *criService) memoryContainerStats(ID string, stats interface{}, timestamp time.Time) (*runtime.MemoryUsage, error) {
+func (c *criService) memoryContainerStats(stats interface{}, timestamp time.Time) (*runtime.MemoryUsage, error) {
 	switch metrics := stats.(type) {
 	case *cg1.Metrics:
 		if metrics.Memory != nil && metrics.Memory.Usage != nil {
